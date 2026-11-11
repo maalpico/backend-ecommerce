@@ -1,0 +1,458 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ==========================================
+// ENUMS
+// ==========================================
+
+enum Rol {
+  SUPERADMIN
+  ADMIN
+  VENDEDOR
+  CLIENTE
+}
+
+enum TipoEntrega {
+  PICKUP
+  ENVIO_DOMICILIO
+}
+
+enum MetodoPago {
+  STRIPE
+  MERCADO_PAGO
+  PAYPAL
+  EFECTIVO          // POS
+  TARJETA_CREDITO   // POS / Terminal física
+  TARJETA_DEBITO    // POS / Terminal física
+  TRANSFERENCIA     // SPEI / Depósito bancario
+  MIXTO             // Combinación de varios métodos (POS)
+  OTRO
+}
+
+enum EstadoPago {
+  PENDIENTE
+  APROBADO
+  RECHAZADO
+  REEMBOLSADO
+}
+
+enum EstadoOrden {
+  PENDIENTE
+  PAGADA
+  EN_PREPARACION
+  LISTA_PARA_PICKUP
+  EN_CAMINO
+  ENTREGADA
+  CANCELADA
+}
+
+enum AlcancePromocion {
+  GLOBAL
+  CATEGORIA
+  MARCA
+  MANUAL
+}
+
+enum TipoDestacado {
+  HOME_PORTADA
+  MAS_VENDIDOS
+  RECIEN_LLEGADOS
+  OFERTAS
+}
+
+// ==========================================
+// NÚCLEO MULTI-TENANT & USUARIOS
+// ==========================================
+
+model Tenant {
+  id                 String               @id @default(uuid())
+  nombre             String
+  slug               String               @unique
+  dominio            String?              @unique
+  activo             Boolean              @default(true)
+  creadoEn           DateTime             @default(now())
+  actualizadoEn      DateTime             @updatedAt
+
+  usuarios           Usuario[]
+  sucursales         Sucursal[]
+  categorias         Categoria[]
+  marcas             Marca[]
+  productos          Producto[]
+  promociones        Promocion[]
+  sliders            Slider[]
+  destacados         ProductoDestacado[]
+  ordenes            Orden[]
+  imagenes           Imagen[]
+
+  @@index([slug])
+}
+
+model Usuario {
+  id            Int       @id @default(autoincrement())
+  email         String
+  password      String
+  nombre        String
+  telefono      String?
+  rol           Rol       @default(CLIENTE)
+  activo        Boolean   @default(true)
+  tenantId      String?
+  tenant        Tenant?    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  creadoEn      DateTime  @default(now())
+  actualizadoEn DateTime  @updatedAt
+
+  ordenes       Orden[]
+
+  @@unique([email, tenantId])
+  @@index([tenantId, rol])
+}
+
+// ==========================================
+// GESTIÓN DE SUCURSALES (PICKUP)
+// ==========================================
+
+model Sucursal {
+  id            Int       @id @default(autoincrement())
+  nombre        String
+  telefono      String?
+  direccion     String
+  colonia       String?
+  ciudad        String
+  estado        String
+  codigoPostal  String
+  referencias   String?
+  activoPickup  Boolean   @default(true)
+  horarioTexto  String?   // Ej: "Lun a Sab de 9:00 AM a 7:00 PM"
+  
+  tenantId      String
+  tenant        Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  ordenesPickup Orden[]
+
+  @@index([tenantId, activoPickup])
+}
+
+// ==========================================
+// ALMACÉN CENTRAL DE IMÁGENES
+// ==========================================
+
+model Imagen {
+  id              Int                      @id @default(autoincrement())
+  url             String
+  textoAlternativo String?
+  keyAlmacen      String?                  // ID o ruta en S3 / Cloudinary / Bucket
+  creadoEn        DateTime                 @default(now())
+
+  tenantId        String
+  tenant          Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // Relaciones hacia tablas intermedias
+  variantes       ProductoVarianteImagen[]
+  categorias      CategoriaImagen[]
+  marcas          MarcaImagen[]
+  sliderItems     SliderItem[]
+
+  @@index([tenantId])
+}
+
+// ==========================================
+// CATÁLOGO: CATEGORÍAS, MARCAS, PRODUCTOS
+// ==========================================
+
+model Categoria {
+  id              Int               @id @default(autoincrement())
+  nombre          String
+  slug            String
+  activo          Boolean           @default(true)
+  
+  tenantId        String
+  tenant          Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // Recursividad para N niveles de subcategorías
+  padreId         Int?
+  padre           Categoria?        @relation("Subcategorias", fields: [padreId], references: [id], onDelete: Cascade)
+  hijos           Categoria[]       @relation("Subcategorias")
+
+  productos       Producto[]
+  imagenes        CategoriaImagen[]
+  promociones     Promocion[]
+
+  @@unique([slug, tenantId])
+  @@index([tenantId, padreId])
+}
+
+model CategoriaImagen {
+  id          Int       @id @default(autoincrement())
+  categoriaId Int
+  categoria   Categoria @relation(fields: [categoriaId], references: [id], onDelete: Cascade)
+  imagenId    Int
+  imagen      Imagen    @relation(fields: [imagenId], references: [id], onDelete: Cascade)
+  orden       Int       @default(0)
+
+  @@unique([categoriaId, imagenId])
+}
+
+model Marca {
+  id          Int           @id @default(autoincrement())
+  nombre      String
+  slug        String
+  activo      Boolean       @default(true)
+
+  tenantId    String
+  tenant      Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  productos   Producto[]
+  imagenes    MarcaImagen[]
+  promociones Promocion[]
+
+  @@unique([slug, tenantId])
+  @@index([tenantId])
+}
+
+model MarcaImagen {
+  id        Int      @id @default(autoincrement())
+  marcaId   Int
+  marca     Marca    @relation(fields: [marcaId], references: [id], onDelete: Cascade)
+  imagenId  Int
+  imagen    Imagen   @relation(fields: [imagenId], references: [id], onDelete: Cascade)
+  orden     Int      @default(0)
+
+  @@unique([marcaId, imagenId])
+}
+
+model Producto {
+  id               Int                @id @default(autoincrement())
+  nombre           String
+  slug             String
+  descripcionCorta String?
+  descripcion      String?
+  activo           Boolean            @default(true)
+
+  tenantId         String
+  tenant           Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  categoriaId      Int?
+  categoria        Categoria?         @relation(fields: [categoriaId], references: [id], onDelete: SetNull)
+
+  marcaId          Int?
+  marca            Marca?             @relation(fields: [marcaId], references: [id], onDelete: SetNull)
+
+  variantes        ProductoVariante[]
+  creadoEn         DateTime           @default(now())
+  actualizadoEn    DateTime           @updatedAt
+
+  @@unique([slug, tenantId])
+  @@index([tenantId, categoriaId])
+  @@index([tenantId, marcaId])
+}
+
+model ProductoVariante {
+  id                 Int                      @id @default(autoincrement())
+  sku                String
+  costo              Decimal?                 @db.Decimal(12, 2) // Costo de adquisición/producción
+  precio             Decimal                  @db.Decimal(12, 2) // Precio de venta base
+  precioPromocional  Decimal?                 @db.Decimal(12, 2) // Precio con descuento aplicado
+  stock              Int                      @default(0)
+  atributos          Json                     // Ej: {"color": "Negro", "talla": "28 MX"}
+  activo             Boolean                  @default(true)
+
+  productoId         Int
+  producto           Producto                 @relation(fields: [productoId], references: [id], onDelete: Cascade)
+
+  imagenes           ProductoVarianteImagen[]
+  promociones        PromocionVariante[]
+  destacados         ProductoDestacado[]
+  ordenItems         OrdenItem[]
+
+  @@unique([sku, productoId])
+  @@index([productoId])
+  @@index([precioPromocional])
+}
+
+model ProductoVarianteImagen {
+  id                 Int              @id @default(autoincrement())
+  varianteId         Int
+  variante           ProductoVariante @relation(fields: [varianteId], references: [id], onDelete: Cascade)
+  imagenId           Int
+  imagen             Imagen           @relation(fields: [imagenId], references: [id], onDelete: Cascade)
+  orden              Int              @default(0)
+  esPrincipal        Boolean          @default(false)
+
+  @@unique([varianteId, imagenId])
+  @@index([varianteId, esPrincipal])
+}
+
+// ==========================================
+// PROMOCIONES Y DESCUENTOS
+// ==========================================
+
+model Promocion {
+  id               Int                 @id @default(autoincrement())
+  nombre           String              // Ej: "Buen Fin 2026", "Descuento Nike 15%"
+  descripcion      String?
+  porcentajeDesc   Decimal             @db.Decimal(5, 2) // Ej: 20.00 para 20%
+  fechaInicio      DateTime
+  fechaFin         DateTime
+  activa           Boolean             @default(true)
+  alcance          AlcancePromocion    @default(MANUAL)
+
+  tenantId         String
+  tenant           Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // Filtros condicionales automáticos si el alcance no es MANUAL
+  categoriaId      Int?
+  categoria        Categoria?          @relation(fields: [categoriaId], references: [id], onDelete: SetNull)
+
+  marcaId          Int?
+  marca            Marca?              @relation(fields: [marcaId], references: [id], onDelete: SetNull)
+
+  variantes        PromocionVariante[]
+  creadoEn         DateTime            @default(now())
+
+  @@index([tenantId, activa, fechaInicio, fechaFin])
+}
+
+model PromocionVariante {
+  id          Int              @id @default(autoincrement())
+  promocionId Int
+  promocion   Promocion        @relation(fields: [promocionId], references: [id], onDelete: Cascade)
+  varianteId  Int
+  variante    ProductoVariante @relation(fields: [varianteId], references: [id], onDelete: Cascade)
+
+  @@unique([promocionId, varianteId])
+  @@index([varianteId])
+}
+
+// ==========================================
+// SLIDERS Y PRODUCTOS DESTACADOS
+// ==========================================
+
+model Slider {
+  id          Int          @id @default(autoincrement())
+  nombre      String       // Ej: "Banner Principal Home", "Slider Temporada"
+  identificador String     // Ej: "home-top", "banner-ofertas"
+  activo      Boolean      @default(true)
+
+  tenantId    String
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  items       SliderItem[]
+
+  @@unique([identificador, tenantId])
+  @@index([tenantId, activo])
+}
+
+model SliderItem {
+  id          Int       @id @default(autoincrement())
+  titulo      String?
+  subtitulo   String?
+  enlaceUrl   String?
+  orden       Int       @default(0)
+  activo      Boolean   @default(true)
+
+  sliderId    Int
+  slider      Slider    @relation(fields: [sliderId], references: [id], onDelete: Cascade)
+
+  imagenId    Int
+  imagen      Imagen    @relation(fields: [imagenId], references: [id], onDelete: Restrict)
+
+  @@index([sliderId, orden])
+}
+
+model ProductoDestacado {
+  id          Int              @id @default(autoincrement())
+  tipo        TipoDestacado    @default(HOME_PORTADA)
+  orden       Int              @default(0)
+
+  tenantId    String
+  tenant      Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  varianteId  Int
+  variante    ProductoVariante @relation(fields: [varianteId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, tipo, varianteId])
+  @@index([tenantId, tipo, orden])
+}
+
+// ==========================================
+// VENTAS Y DETALLE DE ORDEN
+// ==========================================
+
+model Orden {
+  id                 Int          @id @default(autoincrement())
+  numeroOrden        String       @unique // Ej: "ORD-2026-0001"
+  estado             EstadoOrden  @default(PENDIENTE)
+  tipoEntrega        TipoEntrega  @default(ENVIO_DOMICILIO)
+  
+  // Desglose Contable
+  subtotal           Decimal      @db.Decimal(12, 2) // Suma de items antes de IVA y descuentos
+  descuentoTotal     Decimal      @default(0.00) @db.Decimal(12, 2)
+  montoIva           Decimal      @default(0.00) @db.Decimal(12, 2) // IVA desglosado (ej. 16% o tasa fronteriza 8%)
+  costoEnvio         Decimal      @default(0.00) @db.Decimal(12, 2)
+  total              Decimal      @db.Decimal(12, 2) // subtotal - descuento + montoIva + costoEnvio
+
+  // Pagos y Pasarelas
+  metodoPagoPrincipal MetodoPago  @default(STRIPE)
+  estadoPago          EstadoPago  @default(PENDIENTE)
+
+  // En caso de PICKUP en tienda
+  sucursalId         Int?
+  sucursal           Sucursal?    @relation(fields: [sucursalId], references: [id], onDelete: SetNull)
+
+  // En caso de ENVIO A DOMICILIO
+  direccionEnvio     Json?        // { "calle": "...", "num": "...", "ciudad": "...", "cp": "..." }
+
+  tenantId           String
+  tenant             Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  usuarioId          Int
+  usuario            Usuario      @relation(fields: [usuarioId], references: [id], onDelete: Restrict)
+
+  items              OrdenItem[]
+  pagos              OrdenPago[]  // Detalle de cobros (clave para pagos mixtos o tracking de pasarelas)
+  
+  creadoEn           DateTime     @default(now())
+  actualizadoEn      DateTime     @updatedAt
+
+  @@index([tenantId, estado])
+  @@index([tenantId, metodoPagoPrincipal])
+  @@index([usuarioId])
+}
+
+model OrdenItem {
+  id              Int              @id @default(autoincrement())
+  cantidad        Int
+  precioUnitario  Decimal          @db.Decimal(12, 2) // Precio congelado al momento de comprar
+  total           Decimal          @db.Decimal(12, 2)
+
+  ordenId         Int
+  orden           Orden            @relation(fields: [ordenId], references: [id], onDelete: Cascade)
+
+  varianteId      Int
+  variante        ProductoVariante @relation(fields: [varianteId], references: [id], onDelete: Restrict)
+
+  @@index([ordenId])
+}
+
+model OrdenPago {
+  id              Int         @id @default(autoincrement())
+  metodo          MetodoPago
+  monto           Decimal     @db.Decimal(12, 2)
+  estado          EstadoPago  @default(APROBADO)
+  
+  // Datos devueltos por Stripe / Mercado Pago / Terminal bancaria
+  referenciaExterna String?   // Ej: "pi_3MtwBwLkdIwHu7ix28a3tqPa" (Stripe) o número de folio del voucher
+  notas           String?     // Ej: "Recibido $1000 en efectivo, cambio entregado $200"
+
+  ordenId         Int
+  orden           Orden       @relation(fields: [ordenId], references: [id], onDelete: Cascade)
+  creadoEn        DateTime    @default(now())
+
+  @@index([ordenId])
+  @@index([referenciaExterna])
+}
